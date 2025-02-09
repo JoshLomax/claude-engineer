@@ -4,6 +4,8 @@ import os
 from werkzeug.utils import secure_filename
 import base64
 from config import Config
+import mimetypes
+from tools.enhancedimagetool import EnhancedImageTool
 
 app = Flask(__name__, static_folder='static')
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -14,6 +16,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Initialize the assistant
 assistant = Assistant()
+image_tool = EnhancedImageTool()
 
 @app.route('/')
 def home():
@@ -27,24 +30,31 @@ def chat():
     
     # Prepare the message content
     if image_data:
-        # Create a message with both text and image in correct order
+        # Parse the image data and media type
+        if isinstance(image_data, dict):
+            base64_data = image_data.get('data', '')
+            media_type = image_data.get('media_type')
+        else:
+            base64_data = image_data.split(',')[1] if ',' in image_data else image_data
+            media_type = 'image/jpeg'  # fallback
+        
+        # Create a message with both text and image
         message_content = [
+            {
+                "type": "text",
+                "text": message
+            } if message.strip() else None,
             {
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": "image/jpeg",  # We should detect this from the image
-                    "data": image_data.split(',')[1] if ',' in image_data else image_data  # Remove data URL prefix if present
+                    "media_type": media_type,
+                    "data": base64_data
                 }
             }
         ]
-        
-        # Only add text message if there is actual text
-        if message.strip():
-            message_content.append({
-                "type": "text",
-                "text": message
-            })
+        # Remove None entries
+        message_content = [m for m in message_content if m is not None]
     else:
         # Text-only message
         message_content = message
@@ -97,26 +107,33 @@ def upload_file():
     if file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
     
-    if file and file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+    if file and file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
-        # Get the actual media type
-        media_type = file.content_type or 'image/jpeg'  # Default to jpeg if not detected
-        
-        # Convert image to base64
-        with open(filepath, "rb") as image_file:
-            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-        
-        # Clean up the file
-        os.remove(filepath)
-        
-        return jsonify({
-            'success': True,
-            'image_data': encoded_string,
-            'media_type': media_type
-        })
+        try:
+            # Use EnhancedImageTool to process the image
+            result = image_tool.execute(image_path=filepath)
+            
+            # The result is already in the correct format with proper media type
+            image_data = result[0]['source']['data']
+            media_type = result[0]['source']['media_type']
+            
+            # Clean up the file
+            os.remove(filepath)
+            
+            return jsonify({
+                'success': True,
+                'image_data': image_data,
+                'media_type': media_type
+            })
+            
+        except Exception as e:
+            # Clean up the file in case of error
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            return jsonify({'error': str(e)}), 400
     
     return jsonify({'error': 'Invalid file type'}), 400
 
@@ -127,4 +144,4 @@ def reset():
     return jsonify({'status': 'success'})
 
 if __name__ == '__main__':
-    app.run(debug=False) 
+    app.run(debug=False)
